@@ -1,0 +1,1133 @@
+---
+title: "Repositories"
+execute:
+  echo: false
+format: 
+  html:
+    fig-width: 8
+    fig-height: 4
+    code-fold: false
+---
+
+<!---
+******** STRUCTURE OF THIS FILE: ********
+1. Utility functions
+2. R pre-processing functions
+3. R -> js conversion
+4. Read js data
+5. Repo selector
+6. Filter repo data
+7. Text strings for cards
+    (---start of displayed content---)
+8. CARDS GRID (2-by-2 layout)
+9. Pkgcheck summary
+10. R-universe summary
+11. Cran summary
+12. Statistical properties
+13. Function usage
+    (---end of displayed content---)
+--->
+
+<!---
+******** 1. START UTILITY FUNCTIONS ********
+--->
+
+```{ojs}
+function sparkbar(max) {
+  const colourScale = d3.scaleSequential(d3.interpolateCool)
+    .domain([0, max]);
+
+  return (x) => htl.html`<div style="
+    background: ${colourScale(x)};
+    color: black;
+    width: ${100 * x / max}%;
+    float: right;
+    padding-right: 3px;
+    box-sizing: border-box;
+    overflow: visible;
+    display: flex;
+    justify-content: end;">${x.toFixed(2).toLocaleString("en-US")}`
+}
+```
+
+<!---
+******** 1. END UTILITY FUNCTIONS ********
+--->
+
+<!---
+******** 2. START R PRE-PROCESSING FUNCTIONS ********
+--->
+
+```{r load-pkg, echo = FALSE, message = FALSE}
+library (orgmetrics)
+```
+
+```{r load-data}
+data_metrics <- readRDS (fs::path ("data", "results-metrics.Rds"))
+# which.max does not work for dates, but max does
+index1 <- which (names (data_metrics) == max (names (data_metrics)))
+data_metrics <- data_metrics [[index1]]
+data_metrics$value [which (is.na (data_metrics$value))] <- 0
+data_models <- readRDS (fs::path ("data", "results-models.Rds"))
+data_repo_src <- readRDS (fs::path ("data", "results-data-repo-src.Rds"))
+
+data_ctb_abs <- readRDS (fs::path ("data", "results-data-ctb-absence.Rds"))
+data_issue_resp <- readRDS (fs::path ("data", "results-data-issue-resp.Rds"))
+data_issue_bugs <- readRDS (fs::path ("data", "results-data-issue-bugs.Rds"))
+data_ctbs <- readRDS (fs::path ("data", "results-maintenance-contribs.Rds"))
+```
+
+```{r data outliers}
+threshold <- 0.9
+data_metrics <- data_metrics |>
+    dplyr::group_by (name) |>
+    dplyr::arrange (value) |>
+    dplyr::mutate (
+        outlier = dplyr::row_number (value) <= dplyr::n () * (1 - threshold) |
+            dplyr::row_number (value) >= dplyr::n () * threshold
+    ) |>
+    dplyr::arrange (package, dplyr::desc (value))
+
+data_models <- data_models |>
+    dplyr::group_by (name) |>
+    dplyr::arrange (value) |>
+    dplyr::mutate (
+        outlier = dplyr::row_number (value) <= dplyr::n () * (1 - threshold) |
+            dplyr::row_number (value) >= dplyr::n () * threshold
+    ) |>
+    dplyr::arrange (package, dplyr::desc (value))
+
+data_pkgcheck <- readRDS (fs::path ("data", "results-pkgcheck.Rds"))
+names (data_pkgcheck) <- gsub ("^.*\\/", "", names (data_pkgcheck))
+pkgcheck_summaries <- lapply (data_pkgcheck, function (d) {
+    out <- pkgcheck:::summarise_all_checks (d)
+    out <- gsub ("\\:heavy\\_check\\_mark\\:", "&#9989;", out)
+    out <- gsub ("\\:heavy\\_multiplication\\_x\\:", "&#10060;", out)
+    out <- gsub ("\\:eyes\\:", "&#128064;", out)
+    gsub ("^\\-(\\s?)", "", grep ("^\\-", out, value = TRUE))
+})
+measures_rm <- c (
+    "files_vignettes", "loc_vignettes", "data_size_median",
+    "n_fns_r_not_exported", "rel_whitespace_R", "rel_whitespace_vignettes",
+    "rel_whitespace_tests"
+)
+pkgcheck_stats <- lapply (data_pkgcheck, function (d) {
+    d$info$pkgstats |>
+        dplyr::select (-noteworthy) |>
+        dplyr::filter (!measure %in% measures_rm) |>
+        dplyr::mutate (value = dplyr::case_when (
+            measure == "data_size_total" ~ round (value / 1024),
+            .default = value
+        )) |>
+        dplyr::mutate (measure = dplyr::case_when (
+            measure == "files_R" ~ "Nr. Files: R",
+            measure == "files_vignettes" ~ "Nr. Vignettes",
+            measure == "files_tests" ~ "Nr. Files: tests",
+            measure == "loc_R" ~ "LOC: R",
+            measure == "loc_tests" ~ "LOC: tests",
+            measure == "num_vignettes" ~ "Nr. vignettes",
+            measure == "data_size_total" ~ "Data size (kB)",
+            measure == "n_fns_r" ~ "Nr. fns: R",
+            measure == "n_fns_r_exported" ~ "Nr. exported fns: R",
+            measure == "n_fns_per_file_r" ~ "Nr. fns per file",
+            measure == "num_params_per_fn" ~ "Nr. params per fn",
+            measure == "loc_per_fn_r" ~ "LOC per fn: R",
+            measure == "loc_per_fn_r_exp" ~ "LOC per exported fn: R",
+            measure == "loc_per_fn_r_not_exp" ~ "LOC per non-exported fn: R",
+            measure == "doclines_per_fn_exp" ~ "Doc. lines per exported fn.",
+            measure == "doclines_per_fn_not_exp" ~ "Doc. lines per non-exported fn.",
+            measure == "fn_call_network_size" ~ "Nr. nodes in fn. call network",
+            .default = measure
+        ))
+})
+
+all_pkgs <- names (data_pkgcheck)
+deps <- lapply (data_pkgcheck, function (d) {
+    deps <- d$pkg$dependencies |> dplyr::filter (package != "NA")
+    imp <- length (which (deps$type == "imports"))
+    sug <- length (which (deps$type == "suggests"))
+    deps_in_org <- deps$package [which (deps$package %in% all_pkgs)]
+    if (length (deps_in_org) == 0L) {
+        deps_in_org <- NA
+    }
+    data.frame (imports = imp, suggests = sug, deps_in_org = I (list (deps_in_org)))
+})
+deps <- do.call (rbind, deps) |>
+    dplyr::mutate (package = all_pkgs, .before = "imports")
+
+revdeps <- lapply (deps$package, function (p) {
+    index <- which (vapply (
+        deps$deps_in_org,
+        function (o) p %in% o,
+        logical (1L)
+    ))
+    res <- deps$package [index]
+    if (length (res) == 0L) {
+        res <- NA
+    }
+    return (res)
+})
+deps$revdeps <- I (revdeps)
+rownames (deps) <- NULL
+
+repo_metrics_data <- readRDS (fs::path ("data", "results-repo-metrics.Rds"))
+
+fn_calls <- readRDS (fs::path ("data", "fn-calls.Rds"))$fn_calls |>
+    dplyr::group_by (fn, source) |>
+    dplyr::rename (name = fn, package = source) |>
+    dplyr::summarise (n = sum (n), .groups = "keep") |>
+    dplyr::ungroup () |>
+    dplyr::mutate (name = gsub ("^.*\\:\\:", "", name)) |>
+    dplyr::group_by (package) |>
+    dplyr::arrange (dplyr::desc (n), .by_group = TRUE) |>
+    dplyr::ungroup () |>
+    dplyr::rename (fn_name = name)
+
+# Re-ranking of embedding similarities:
+similarities <- readRDS (fs::path ("data", "similarities.Rds"))
+npkgs <- nrow (similarities [[1]])
+k <- 60
+ranks_each <- lapply (similarities, function (s) {
+    1 / (k + apply (s, 2, function (i) order (i, decreasing = TRUE)))
+})
+ranks <- lapply (seq_len (npkgs), function (i) {
+    ranks_i <- lapply (similarities, function (s) s [, i])
+    rowSums (do.call (cbind, ranks_i))
+})
+ranks <- do.call (rbind, ranks)
+rank_names <- colnames (similarities [[1]])
+```
+
+```{r ojs-in-metrics}
+ojs_define (metrics_in = data_metrics)
+ojs_define (models_in = data_models)
+ojs_define (repo_src_in = data_repo_src)
+ojs_define (ctb_abs_in = data_ctb_abs)
+ojs_define (issue_resp_in = data_issue_resp)
+ojs_define (issue_bugs_in = data_issue_bugs)
+ojs_define (pkgcheck_in = pkgcheck_summaries)
+ojs_define (pkgcheck_stats_in = pkgcheck_stats)
+ojs_define (repo_metrics_in = repo_metrics_data)
+ojs_define (deps_in = deps)
+ojs_define (fn_calls_in = fn_calls)
+ojs_define (ctbs_in = data_ctbs)
+ojs_define (ranks_in = ranks)
+ojs_define (rank_names_in = rank_names)
+```
+
+<!---
+******** 2. END R PRE-PROCESSING FUNCTIONS ********
+--->
+
+```{ojs load-r-data}
+// -------- 3. R -> JS CONVERSION
+
+metricsTranspose = {
+    return transpose(metrics_in).map(row => ({
+        ...row,
+    }));
+}
+repo_src = {
+    return transpose(repo_src_in).map(row => ({
+        ...row,
+    }));
+}
+ctb_absTranspose = {
+    return transpose(ctb_abs_in).map(row => ({
+        ...row,
+    }));
+}
+issue_respTranspose = {
+    return transpose(issue_resp_in).map(row => ({
+        ...row,
+    }));
+}
+issue_bugsTranspose = {
+    return transpose(issue_bugs_in).map(row => ({
+        ...row,
+    }));
+}
+depsTranspose = {
+    return transpose(deps_in).map(row => ({
+        ...row,
+    }));
+}
+fnCallsTranspose = {
+    return transpose(fn_calls_in).map(row => ({
+        ...row,
+    }));
+}
+```
+
+<!---- break --->
+
+```{ojs load-json-data}
+// -------- 4. READ JS DATA
+json_data = FileAttachment("results-json-data.json").json();
+gitlogDataTranspose = json_data['gitlog'].map(row => ({
+    ...row,
+    first_commit: new Date(row.first_commit),
+    latest_commit: new Date(row.latest_commit)
+}));
+
+cranDataAll = json_data['cran'];
+not_cran_in = json_data['not_cran'];
+data_releases = json_data['data_releases'];
+repos_on_r_univ = json_data['r_universe']['data_is_on_r_univ'];
+data_r_univ_jobs = json_data['r_universe']['r_univ_jobs'];
+data_r_univ_builds = json_data['r_universe']['r_univ_builds'];
+data_r_univ_stats = json_data['r_universe']['r_univ_stats'];
+```
+
+
+<!---- break --->
+
+```{ojs get-all-repos}
+// -------- 5. REPO SELECTOR
+// This can also be set via localStorage in org page
+// Get array of unique repo names for input selector:
+reposAll = metricsTranspose.map(function(item) {
+    return item.package;
+});
+repos = Array.from(new Set(reposAll));
+
+// -------- 5A. SEARCH PARAMETERS VS LOCALSTORAGE
+searchParams = new URLSearchParams(window.location.search);
+initialRepoSet = function(searchParams, repos) {
+    var initialRepo = searchParams.get('repo');
+    if (initialRepo) {
+        localStorage.setItem("orgmetricsRepo", initialRepo);
+    } else {
+        initialRepo = localStorage.getItem("orgmetricsRepo");
+    }
+
+    if (!initialRepo) {
+        initialRepo = repos [Math.floor(Math.random() * repos.length)];
+    }
+
+    return initialRepo;
+}
+
+repoSet = initialRepoSet(searchParams, repos);
+viewof repo = Inputs.select(
+    repos,
+    {
+        multiple: false,
+        value: repoSet,
+        label: htl.html`<b>Repository:</b>`
+    }
+)
+s = localStorage.setItem("orgmetricsRepo", repo.toString());
+
+updateSearchParams = function(searchParams, key, value) {
+    if (value) {
+        searchParams.set(key, value);
+    }
+    return searchParams;
+}
+searchParamsRepo = updateSearchParams(searchParams, 'repo', repo.toString());
+url = window.location.pathname;
+hash = window.location.hash;
+url_new = `${url}?${searchParamsRepo.toString()}${hash}`;
+tempvar = window.history.replaceState(null, '', url_new);
+```
+
+<!---- break --->
+
+<div style="margin-top: 20px; margin-bottom: 20px;"></div>
+
+```{ojs}
+// and get URL for selected repo
+repoURL = repo_src.filter(function(r) {
+    return r.package === repo
+})[0].url;
+
+htl.html`<div>
+Click here for the source code of the
+<a href=${repoURL} target="_blank"><i>${repo}</i> repository</a>.
+</div>`
+```
+
+<!---- break --->
+
+<div style="margin-top: 20px; margin-bottom: 20px;"></div>
+
+```{ojs}
+// -------- 6. FILTER REPO DATA
+
+ctb_abs = ctb_absTranspose.filter(function(r) {
+    return r.repo === repo
+})
+issue_resp = issue_respTranspose.filter(function(r) {
+    return r.repo === repo
+})
+issue_bugs = issue_bugsTranspose.filter(function(r) {
+    return r.repo === repo
+})
+deps = depsTranspose.filter(function(r) {
+    return r.package === repo
+})
+fn_calls = fnCallsTranspose.filter(function(r) {
+    return r.package === repo
+})
+has_fn_calls = fn_calls.length > 0;
+cran_data = cranDataAll.filter(function(r) {
+    return r.package === repo
+})
+has_cran_data = cran_data.length > 0;
+not_on_cran = not_cran_in.includes(repo);
+
+gitlog = gitlogDataTranspose.filter(function(r) {
+    return r.package === repo
+})
+gitlog_total_commits = gitlog[0]['num_commits'].toLocaleString();
+gitlog_recent_commits = gitlog[0]['recent_commits'].toLocaleString();
+gitlog_first_commit = gitlog[0]['first_commit'].toLocaleDateString("en-GB", {
+    month: 'short',
+    year: 'numeric'
+});
+gitlog_latest_commit = gitlog[0]['latest_commit'].toLocaleDateString("en-GB", {
+    month: 'short',
+    year: 'numeric'
+});
+
+releases = data_releases.filter(function(r) {
+    return r.package === repo
+})
+
+r_univ_page = repos_on_r_univ.filter(function(r) {
+    return r.package === repo
+})
+is_on_r_univ = r_univ_page.length > 0;
+r_univ_universe = is_on_r_univ ? r_univ_page[0]['universe'] : undefined;
+r_univ_package = is_on_r_univ ? r_univ_page[0]['package'] : undefined;
+
+r_univ_jobs = data_r_univ_jobs[repo];
+r_univ_builds = data_r_univ_builds[repo];
+
+r_univ_stats = data_r_univ_stats.filter(function(r) {
+    return r.package === repo
+})
+r_univ_score = is_on_r_univ ? r_univ_stats[0]['score'].toLocaleString() : undefined;
+r_univ_url = "https://" + r_univ_universe + ".r-universe.dev/" + r_univ_package;
+r_univ_score_html = r_univ_score ?
+    htl.html`<a href=${r_univ_url} target="_blank">r-universe score</a>: ${r_univ_score}` :
+    htl.html`Repository not on r-universe`;
+// r_univ_n_scripts = r_univ_stats[0]['n_scripts'].toLocaleString();
+```
+
+<!---- break --->
+
+```{ojs}
+repoMetrics = {
+    return transpose(repo_metrics_in[repo]).map(row => ({
+        ...row,
+    }))
+}
+ctbs_all = {
+    return transpose(ctbs_in[repo]).map(row => ({
+        ...row,
+    }))
+}
+
+auts = ctbs_all.filter(function(ctb) {
+    return ctb.is_author
+})
+ctbs = ctbs_all.filter(function(ctb) {
+    return !ctb.is_author
+})
+
+ctbs_gh = ctbs.map((ctb) => ctb['login']).filter(item => item != null);
+auts_gh = auts.map((aut) => aut['login']).filter(item => item != null);
+```
+
+
+<!---- break --->
+
+```{ojs}
+// Most similar packages from LLM embedding similarities
+rank_index = rank_names_in.indexOf(repo);
+rank_vector = ranks_in[rank_index];
+order_vector = Array
+    .from(rank_vector.keys())
+    .sort((a, b) => rank_vector[b] - rank_vector[a])
+    .filter(item => item !== rank_index);
+num_similar = 5
+order_vector_sub = order_vector.slice(0, num_similar);
+matched_names = order_vector_sub.map(i => rank_names_in[i]);
+
+similar_pkgs = matched_names.map(i => {
+    const url = (repo_src.filter(function(r) {
+        return r.package === i
+    }, i)[0] || {}).url || null;
+    return htl.html`<li><a href="/repo.html?repo=${i}" onclick="localStorage.setItem('orgmetricsRepo', '${i}')">${i}</a></li>`
+});
+```
+
+<!---- break --->
+
+```{ojs}
+// -------- 7. TEXT STRINGS FOR CARDS
+
+function pluraliseObjects(x, what) {
+    if (x === 0) {
+        return "No " + what + "s";
+    } else if (x === 1) {
+        return "1 " + what;
+    } else {
+        return x + " " + what + "s";
+    }
+}
+
+release_latest = new Date(releases[0].latest).toLocaleDateString("en-GB", {
+    month: 'short',
+    year: 'numeric'
+});
+releases_txt_total = releases[0].total > 0 ?
+    (releases[0].total == 1 ? htl.html`1 release to date (${release_latest})` :
+htl.html`${releases[0].total} releases (latest: ${release_latest}), ${releases[0].rel_per_year} per year`) :
+    htl.html`No releases to date`;
+
+gitlog_txt_total = htl.html`${gitlog_total_commits} commits since ${gitlog_first_commit}`;
+gitlog_txt_recent = htl.html`${gitlog_recent_commits} commits in past year`;
+
+author_count = auts_gh.length;
+author_count_txt = pluraliseObjects(author_count, "primary author");
+
+author_gh_list = auts_gh.length == 0 ? undefined:
+    (auts_gh.length == 1 ? htl.html`
+<div onclick=${() => localStorage.setItem('orgmetricsMaintainer', auts_gh)}>
+<li><a href='/contributor.html'>${auts_gh}</a></li>
+</div>
+` : auts_gh.map(m => htl.html`
+<div onclick=${() => localStorage.setItem('orgmetricsMaintainer', m)}>
+<li><a href='/contributor.html'>${m}</a></li>
+</div>
+`));
+author_gh_list_txt = auts_gh.length > 0 ? htl.html`<ul>${author_gh_list}</ul>` : undefined;
+
+ctb_count = ctbs_gh.length;
+ctb_count_txt = pluraliseObjects(ctb_count, "additional contributor");
+ctb_count_list = ctbs_gh.map((item, i) => htl.html`
+<span onclick=${() => localStorage.setItem('orgmetricsMaintainer', item)}>
+<a href='/contributor.html'>${item}</a>${i < ctbs_gh.length - 1 ? ", " : ""}</span>`);
+ctb_count_html = ctb_count == 0 ? htl.html`<div>No additional contributors</div>` :
+    htl.html`<div>${ctb_count_txt}: ${ctb_count_list}</div>`;
+
+num_commits = repoMetrics.filter(function(m) {
+    return m.name == "num_commits"
+})[0].value;
+test_coverage = repoMetrics.filter(function(m) {
+    return m.name == "test_coverage"
+})[0].value;
+test_coverage_txt = "Test coverage: " + (test_coverage ? (test_coverage * 100) + "%" : "none");
+
+num_stars = repoMetrics.filter(function(m) {
+    return m.name == "num_stars"
+})[0].value;
+num_forks = repoMetrics.filter(function(m) {
+    return m.name == "num_forks"
+})[0].value;
+stars_forks = (num_stars + num_forks).toLocaleString();
+stars_forks_html = htl.html`<a href=${repoURL} target="_blank">GitHub</a> stars and forks: ${stars_forks}`
+
+num_dl = repoMetrics.filter(function(m) {
+    return m.name == "cran_downloads"
+})[0].value.toLocaleString();
+cran_dl_html = not_on_cran ?
+    htl.html`Package is not on CRAN` :
+    htl.html`Total <a href="https://cran.r-project.org/package=${repo}" target="_blank">CRAN</a> downloads: ${num_dl}`;
+
+issues_active = repoMetrics.filter(function(m) {
+    return m.name == "issues_active"
+})[0].value;
+change_req_n_opened = repoMetrics.filter(function(m) {
+    return m.name == "change_req_n_opened"
+})[0].value;
+issue_count = issues_active + change_req_n_opened;
+gh_text = (issue_count === 1) ? "GitHub Issue" : "GitHub Issues";
+issue_count_html = issues_active ?
+    htl.html`Recent <a href="${repoURL}/issues" target="_blank">${gh_text}</a>: ${issue_count}` :
+    htl.html`No GitHub issues`;
+
+// 'issue_cmt_count' from repometrics is *mean* value; convert back to
+// full count here:
+issue_cmt_count = Math.ceil(repoMetrics.filter(function(m) {
+    return m.name == "issue_cmt_count"
+})[0].value * issues_active);
+gh_issue_cmt_text = (issue_cmt_count === 1) ? "Issue comment" : "Issue comments";
+issue_cmt_html = issues_active ?
+    htl.html`Recent <a href="${repoURL}/issues" target="_blank">${gh_issue_cmt_text}</a>: ${issue_cmt_count}` :
+    htl.html`No issue comments`;
+
+recent_comment_html = (issue_count + issue_cmt_count) > 0 ?
+    htl.html`
+<div style="margin-left:20px; margin-top:-15px; margin-bottom:10px; font-size:14px; white-space:normal;">
+(<i>Recent</i> &#61; previous year)
+</div>` : htl.html`<div></div>`;
+
+imp_txt = 'Imports: ' + deps[0]['imports'];
+sug_txt = 'Suggests: ' + deps[0]['suggests'];
+
+deps_in_org = [].concat(deps[0]['deps_in_org'] || []);
+deps_in_org_txt = deps_in_org.length == 0 ?
+    'Depends on no other pkgs in org' :
+    'Depends on org pkgs:';
+deps_in_org_list = deps_in_org.length === 0 ? undefined :
+    deps_in_org.map(d => htl.html`
+<li>
+<a href='/repo.html?repo=${d}' onclick="localStorage.setItem('orgmetricsRepo', '${d}')">${d}</a>
+</li>`);
+n_deps_in_org_txt = deps_in_org.length > 0 ? htl.html`<ul>${deps_in_org_list}</ul>` : undefined;
+
+revdeps = [].concat(deps[0]['revdeps'] || []);
+revdeps_list = revdeps.length == 0 ? undefined :
+    revdeps.map(d => htl.html`
+<li>
+<a href='/repo.html?repo=${d}' onclick="localStorage.setItem('orgmetricsRepo', '${d}')">${d}</a>
+</li>`);
+revdeps_in_org = revdeps.length > 0 ?
+    'Dependend on by org pkgs:' :
+    'Not depended on by any other pkgs in org';
+revdeps_list_txt = revdeps.length > 0 ? htl.html`<ul>${revdeps_list}</ul>` : undefined;
+```
+
+<!---
+******** 8. START CARDS GRID (2-by-2 layout)********
+--->
+
+:::{.grid}
+
+<!--- CARD ONE: TOP LEFT --->
+::::{.g-col-12 .g-col-md-6}
+<div class="card" style="background: linear-gradient(to bottom, #33ccff 0%, #ffcc99 100%); text-align:center;">
+<img src="bs-icons/tools.svg" alt="Bootstrap" width="48" height="48" style="margin-left:auto; margin-top:5px; margin-right:5px;">
+<div style="text-align:left;">
+<h2 style="margin-top:-20px; margin-left:20px;">Maintenance</h2>
+```{ojs}
+htl.html`<ul>
+    <li>${releases_txt_total}</li>
+    <li>${gitlog_txt_total}</li>
+    <li>${gitlog_txt_recent}</li>
+    <li>${author_count_txt}${author_gh_list_txt}</li>
+    <li>${ctb_count_html}</li>
+    <li>${test_coverage_txt}</li>
+</ul>`
+```
+</div>
+</div>
+::::
+
+<!--- CARD TWO: TOP RIGHT --->
+::::{.g-col-12 .g-col-md-6}
+<div class="card" style="background: linear-gradient(to bottom, #33ccff 0%, #ffcc99 100%); text-align:center;">
+<img src="bs-icons/pencil-square.svg" alt="Bootstrap" class="text-pencil-square" width="48" height="48" style="margin-left:auto; margin-top:5px; margin-right:5px;">
+<div style="text-align:left;">
+<h2 style="margin-top:-20px; margin-left:20px;">Dependencies</h2>
+```{ojs}
+htl.html`<ul>
+    <li>${imp_txt}</li>
+    <li>${sug_txt}</li>
+    <li>${deps_in_org_txt}
+        ${n_deps_in_org_txt}
+    </li>
+    <li>${revdeps_in_org}
+        ${revdeps_list_txt}
+    </li>
+</ul>`
+```
+</div>
+</div>
+::::
+
+
+<!--- CARD THREE: BOTTOM LEFT --->
+::::{.g-col-12 .g-col-md-6}
+<div class="card" style="background: linear-gradient(to bottom, #00cc66 0%, #33ccff 100%); text-align:center;">
+<img src="bs-icons/chat-square-heart.svg" alt="Bootstrap" width="48" height="48" style="margin-left:auto; margin-top:5px; margin-right:5px;">
+<div style="text-align:left;">
+<h2 style="margin-top:-20px; margin-left:20px;">Popularity &#38;<br>GitHub Activity</h2>
+```{ojs}
+htl.html`<ul>
+    <li>${stars_forks_html}</li>
+    <li>${cran_dl_html}</li>
+    <li>${r_univ_score_html}</li>
+    <li>${issue_count_html}</li>
+    <li>${issue_cmt_html}</li>
+</ul>${recent_comment_html}`
+```
+
+</div>
+</div>
+::::
+
+<!--- CARD FOUR: BOTTOM RIGHT --->
+::::{.g-col-12 .g-col-md-6}
+<div class="card" style="background: linear-gradient(to bottom, #00cc66 0%, #33ccff 100%); text-align:center;">
+<img src="bs-icons/github.svg" alt="Bootstrap" width="48" height="48" style="margin-left:auto; margin-top:5px; margin-right:5px;">
+<div style="text-align:left;">
+<h2 style="margin-top:-20px; margin-left:20px;">Similar Packages</h2>
+<div style="margin-left: 10px;">The five most similar packages are:</div>
+```{ojs}
+htl.html`<ul>${similar_pkgs}</ul>`
+```
+<div style="margin-left:10px; margin-top:-15px; margin-right:20px; font-size:14px; white-space:normal;">
+(Assessed from similarities between language model embedding vectors.)
+</div>
+</div>
+</div>
+::::
+
+:::
+
+<!---
+******** 8. END CARDS GRID (2-by-2 layout)********
+--->
+
+
+<div style="margin-top: 20px; margin-bottom: 20px;"></div>
+
+<!-------- 9. PKGCHECK SUMMARY -------->
+
+## pkgcheck Summary
+
+This shows the summary output from [rOpenSci's `pkgcheck`
+package](https://docs.ropensci.org/pkgcheck). Passing checks are marked by
+&#9989;; failing checks by &#10060;; and optional checks that may be worth
+examining with &#128064;.
+
+```{ojs}
+this_pkg_summary = pkgcheck_in[repo];
+
+function unescapeHtml(unsafe) {
+  const textarea = document.createElement('textarea');
+  textarea.innerHTML = unsafe;
+  return textarea.value;
+}
+
+htl.html`
+  <div>${this_pkg_summary.map((item) => htl.html.fragment`<ul>
+    <li>${unescapeHtml(item)}</li>
+  </ul>`)}</div>`
+```
+
+<!-------- 10. R-UNIVERSE SUMMARY -------->
+
+## R-universe summary
+
+```{ojs}
+build_url = is_on_r_univ ? r_univ_builds[0]['buildurl'] : undefined;
+
+build_checks = is_on_r_univ ? r_univ_builds.filter(d => (d['status'] !== "success")) : [];
+build_checks_okay = build_checks.length == 0;
+
+is_on_r_univ ?
+htl.html`<div>Links to
+<a href="https://${r_univ_universe}.r-universe.dev/${r_univ_package}" target="_blank" rel="noopener noreferrer"><i>${r_univ_package}</i> on R-universe</a>
+and to
+<a href="${build_url}" target="_blank" rel="noopener noreferrer">recent R-universe builds</a>.
+</div>` :
+htl.html`<div>This package is not on R-universe</div>`;
+
+htl.html`<div style="margin-top: 10px; margin-bottom: 10px;"></div>`
+
+is_on_r_univ ?
+    (build_checks_okay ?
+        htl.html`<div>&#9989; All recent R-universe builds were successful</div>` :
+        htl.html`<div>&#10060; Some recent R-universe builds were unsuccessful</div>`) :
+    htl.html`<div></div>`;
+
+r_univ_jobs_table = is_on_r_univ ?
+    Inputs.table(r_univ_jobs, {
+        columns: ["job", "config", "r", "check"],
+        format: {
+            job: d => htl.html`<a href="${build_url}/job/${d}" target="_blank" rel="noopener noreferrer">${d.toFixed(0)}</a>`,
+        },
+    }) : htl.html`<div></div>`;
+
+is_on_r_univ ?
+htl.html`<div style="margin-top: 10px;"><details><summary>Recent R-Universe Jobs</summary>${r_univ_jobs_table}</details></div>` : htl.html`<div></div>`;
+
+is_on_r_univ && !build_checks_okay ? htl.html`<h3>Recent Builds</h3>` : htl.html`<div></div>`;
+
+is_on_r_univ && !build_checks_okay ?
+    htl.html`<div><a href=${build_url}>The following recent builds were unsuccessful</a></div>` :
+    htl.html`<div></div>`;
+
+is_on_r_univ && !build_checks_okay?
+    Inputs.table(build_checks, {
+        columns: ["r", "os", "status", "check"],
+    }) : htl.html`<div></div>`;
+```
+
+<!-------- 11. CRAN SUMMARY -------->
+
+## CRAN Summary
+
+```{ojs}
+cran_txt = has_cran_data ? "currently list these issues:" : "are all good";
+cran_url = "https://cran.r-project.org/web/checks/check_results_" + repo + ".html";
+not_on_cran ?
+    htl.html`<div>This package is not on CRAN</div>` :
+    htl.html`<div><a href="${cran_url}" target="_blank" rel="noopener noreferrer">CRAN checks</a> on this package ${cran_txt}</div>`;
+
+htl.html`<div style="margin-top: 20px; margin-bottom: 20px;"></div>`
+
+has_cran_data ?
+    Inputs.table(cran_data, {
+        columns: ["package", "version", "result", "check", "message"],
+        format: {
+            check: d => htl.html`<span style="white-space:normal">${d}`,
+            message: d => htl.html`<span style="white-space:normal">${d}`,
+        }
+    }) : htl.html`<div></div>`;
+```
+
+<!-------- 12. STATISTICAL PROPERTIES -------->
+
+## Statistical properties
+
+This section shows some of the statistical properties of the code base, as
+generated by [the `pkgstats` package](https://docs.ropensci.org/pkgstats). By
+default, only outlier values are shown, for which the "Limits" slider below can
+be used to reduce statistical properties to only those lying in the lower or
+upper percentiles of the specified value. The table uses the following
+abbreviations:
+
+- "LOC" for _Lines-of-Code_
+- "Nr." for _Number_
+- "fn" for _function_
+- "Doc" for _Documentation_
+
+```{ojs}
+viewof statsLimit = Inputs.range(
+    [0,50],
+    {value: 10, step: 5, label: htl.html`<b>Limits:</b>`}
+);
+```
+
+<div style="margin-top: 20px; margin-bottom: 20px;"></div>
+
+```{ojs}
+pkgStatsData = {
+    return transpose(pkgcheck_stats_in[repo]).map(row => ({
+        ...row,
+    })).filter(function(m) {
+        return m.percentile <= statsLimit || m.percentile >= (100 - statsLimit)
+    });
+}
+```
+
+```{ojs}
+Inputs.table(pkgStatsData, {
+    format: {
+        percentile: sparkbar(100),
+        noteworth: null,
+    },
+    header: {
+        measure: "Measure",
+        value: "Value",
+        percentile: "Percentile"
+    }
+})
+```
+
+<div style="margin-top: 20px; margin-bottom: 20px;"></div>
+
+<!-------- 13. FUNCTION USAGE -------->
+
+## Function usage in other packages
+
+```{ojs}
+has_fn_calls ? htl.html`<div>
+The following table shows the number of times different functions are used in
+other packages. Numbers may be less than total numbers of packages listed above
+in <q><i>Dependencies: Used by org pkgs</i></q> because some of those usages may be only
+in tests, whereas the following usage counts are within actual R code only.
+</div>` :
+htl.html`<div>This package is not used in any other packages from the organization,
+and so its functions are not used anywhere else.</div>`;
+```
+
+<div style="margin-top: 20px; margin-bottom: 20px;"></div>
+
+```{ojs}
+has_fn_calls ? Inputs.table(fn_calls, {
+    columns: ["fn_name", "n"],
+    header: {
+        fn_name: "Function name",
+        n: "Usage"
+    }
+}) : htl.html`<div></div>`;
+```
+
+
+
+## CHAOSS metrics and models
+
+```{ojs}
+url_chaoss = "https://chaoss.community/kb-metrics-and-metrics-models/";
+url_chaoss_models = "https://chaoss.community/kbtopic/all-metrics-models/";
+url_chaoss_metrics = "https://chaoss.community/kbtopic/all-metrics/";
+
+htl.html`<div>
+This section highlights important <a href="${url_chaoss}" target="_blank">
+CHAOSS (<i> Community Health Analytics in Open Source Software</i>)</a> metrics
+and models for the
+<a href=${repoURL} target="_blank"><i>${repo}</i> repository</a>.
+The first graph shows
+<q><a href=${url_chaoss_models} target="_blank">models</a></q>,
+which are aggregations of
+<a href=${url_chaoss_metrics} target="_blank">metrics</a>
+into conceptual or thematic groups, and the second provides more detail into
+individual metrics. All values are standardised between 0 and 1 such that
+higher values are always better than lower values. Note that metrics and models
+are only assessed over the previous year. Respositories that have been inactive
+during this time will thus have many scores of zero.
+</div>`
+```
+
+By default, the following charts of both models and metrics only show
+categories for which the repository is an outlier, defined as lying in the
+lower or upper 10% of all repositories. Note that these outlier proportions
+depend on distributions of values measured across all repositories, and will
+generally not correspond values beyond the limits of \[10, 90\]% on the scale
+shown. For example, values for metrics of models may be very concentrated
+around 0.5 with only a very few extreme values. The lower 10% of values may,
+for example, be all those below a value of 0.4. Clicking on the following
+button will toggle to display all values.
+
+The model names shown on the bars are hyperlinked; clicking on any will take
+you to the model definitions on the [CHAOSS Models
+pages](https://chaoss.community/kbtopic/all-metrics-models/).
+
+```{ojs plot-latest}
+Plot = import("https://esm.sh/@observablehq/plot");
+```
+
+```{ojs}
+viewof outliersOnly = Inputs.radio(
+    ["true", "false"],
+    {
+        value: "true",
+        label: htl.html`<b>Outliers only:</b>`,
+    }
+)
+```
+
+#### CHAOSS Models
+
+```{ojs}
+// -------- METRICS-MODELS.JSON FROM REPOMETRICS
+//
+// This file has the text definitions for all metrics & models variables, and
+// used to construct a textMap to replace variable names by text from that
+// file. Note that this needs to use `reduce` to be explicitly assigned to a
+// return value so that Observable executes everything in the expected order.
+// Alternatives like initially constructing an empty map and then implicitly
+// filling with a `forEach` are not correctly executed in the expected
+// sequence.
+
+rm_metrics_models = json_data['rm_metrics_models'];
+rm_models = rm_metrics_models['models'];
+rm_model_text = rm_metrics_models['model_names'];
+modelsTextMap = rm_model_text.reduce((map, item) => {
+    return map.set(String(item.name), item.airtable_name);
+}, new Map());
+rm_metrics = rm_metrics_models['metrics'];
+metricsTextMap = rm_metrics.reduce((map, item) => {
+    return map.set(String(item.name), item.airtable_name);
+}, new Map());
+metricsUrlMap = rm_metrics.reduce((map, item) => {
+    return map.set(String(item.name), item.url);
+}, new Map());
+modelsUrlMap = rm_model_text.reduce((map, item) => {
+    return map.set(String(item.name), item.url);
+}, new Map());
+```
+
+```{ojs}
+// ------ load metrics and models data from R input, replace variables with
+// ------ text from repometrics JSON file, and all model URLs
+
+modelsAll = {
+    return transpose(models_in).map(row => {
+        const key = String(row.name);
+        const keyUrl = modelsUrlMap.has(key) ? modelsUrlMap.get(key) :
+            "https://chaoss.community/kbtopic/all-metrics-models/";
+        return {
+            ...row,
+            url: keyUrl
+        }
+    });
+}
+
+modelRepoVarnames = modelsAll.filter(function(mod) {
+    return mod.package === repo && mod.name !== "final"
+})
+
+modelRepoAll = modelRepoVarnames.map(item => {
+    const key = String(item.name);
+    return {
+        ...item,
+        name: modelsTextMap.has(key) ? modelsTextMap.get(key) : item.name
+    }
+})
+
+metricsAll = metricsTranspose.map(item => {
+    const key = String(item.name);
+    return {
+        ...item,
+        name: metricsTextMap.has(key) ? metricsTextMap.get(key) : item.name,
+        url: metricsUrlMap.has(key) ? metricsUrlMap.get(key) : item.url
+    }
+})
+```
+
+<!--- break --->
+
+```{ojs}
+// ------ filter model data by optional outliersOnly
+// The height of each bar is kept at 25, but `Plot.plot` sets top and bottom
+// margins of 50.
+
+modelRepoFilt = outliersOnly === "true" ?
+    modelRepoAll.filter(function(m) {
+        return m.outlier === true;
+    }) : modelRepoAll;
+modelRepoLen = modelRepoFilt.length;
+oneBarHeight = 20;
+modelPlotHeight = modelRepoLen * oneBarHeight + 100;
+```
+
+<!--- break --->
+
+```{ojs colour-scales}
+// Bar colours should be scaled to full data range, not just restricted range
+// of filtered data.
+fullScaleValues = modelRepoAll.map(d => d.value);
+minVal = Math.min(...fullScaleValues);
+maxVal = Math.max(...fullScaleValues);
+```
+
+
+```{ojs plot-filtered-repo-models}
+Plot.plot({
+    height: modelPlotHeight,
+    marginLeft: 60,
+    marginRight: 160,
+    marginTop: 50,
+    marginBottom: 50,
+    axis: null,
+    x: {
+        axis: "top",
+        grid: true,
+        label: "Model Scores"
+    },
+    y: { grid: true },
+    marks: [
+        Plot.barX(modelRepoFilt, {
+            y: "name",
+            x: "value",
+            sort: {y: "-x" },
+            fill: "value",
+        }),
+        Plot.barX(modelRepoFilt,
+            Plot.pointer(
+            {
+                y: "name",
+                x: "value",
+                sort: {y: "-x" },
+                stroke: "gray",
+                fill: "value",
+                strokeWidth: 2,
+            })
+        ),
+        Plot.text(modelRepoFilt, {
+            x: d => d.value < 0 ? 0 : d.value,
+            y: d => d.name,
+            text: d => d.name,
+            href: d => d.url,
+            textAnchor: "start",
+            fontSize: 16,
+            dx: 5
+        })
+    ],
+    color: {
+        scheme: "Cool",
+        type: "linear",
+        domain: [minVal, maxVal]
+    }
+})
+```
+
+#### CHAOSS metrics
+
+This graph provides more detailed insight into the state of the selected
+repository, through showing values for individual [CHAOSS
+metrics](https://chaoss.community/kbtopic/all-metrics/) used to inform the
+aggregate models. As for models, the names of the metrics are hyperlinked to
+the CHAOSS definitions, many of which are for general collections of metrics.
+
+```{ojs}
+metrics = outliersOnly === "true" ?
+    metricsAll.filter(function(m) {
+        return m.outlier === true;
+    }) : metricsAll;
+
+metricsRepo = metrics.filter(function(mod) {
+    return mod.package === repo
+})
+
+metricsPlotHeight = metricsRepo.length * oneBarHeight + 100;
+```
+
+
+```{ojs plot-filtered-repo-metrics}
+Plot.plot({
+    height: metricsPlotHeight,
+    marginLeft: 60,
+    marginRight: 160,
+    marginTop: 50,
+    marginBottom: 50,
+    axis: null,
+    x: {
+        axis: "top",
+        grid: true,
+        label: "Metric Scores"
+    },
+    y: { grid: true },
+    marks: [
+        Plot.barX(metricsRepo, {
+            y: "name",
+            x: "value",
+            sort: {y: "-x" },
+            fill: "value",
+        }),
+        Plot.barX(metricsRepo,
+            Plot.pointer(
+            {
+                y: "name",
+                x: "value",
+                sort: {y: "-x" },
+                stroke: "gray",
+                fill: "value",
+                strokeWidth: 2,
+            })
+        ),
+        Plot.text(metricsRepo, {
+            x: (d) => d.value < 0 ? 0 : d.value,
+            y: d => d.name,
+            text: d => d.name,
+            href: d => d.url,
+            textAnchor: "start",
+            fontSize: 16,
+            dx: 5
+        })
+    ],
+    color: {
+        scheme: "Cool",
+        type: "ordinal"
+    }
+})
+```
