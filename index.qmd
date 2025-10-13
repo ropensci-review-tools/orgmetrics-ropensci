@@ -1,5 +1,5 @@
 ---
-title: "EpiVerse Organizational Overview"
+title: "rOpenSci Organizational Overview"
 execute:
   echo: false
 format:
@@ -75,12 +75,10 @@ npkgs_requiring_maintenance <- nrow (data)
 ```
 
 This dashboard presents metrics and models for each repository within the
-[`epiverse-trace`](https://github.com/epiverse-trace),
-[`reconhub`](https://github.com/reconhub), and
-[`reconverse`](https://github.com/reconverse) GitHub organizations, and some
-related repositories from other sources. These organizations are linked under the
-`r bsicons::bs_icon("github")` icon on the top right. The dashboard is intended
-to demonstrate the kinds of analyses and insights that are possible, and is
+[rOpenSci's package
+registry](https://github.com/ropensci/roregistry/blob/gh-pages/registry.json).
+The dashboard is intended to demonstrate the kinds of analyses and insights
+that are possible, and is
 expected to change and develop a lot. Please provide feedback by clicking on
 the `r bsicons::bs_icon("github")` symbol and selecting "_Feedback_".
 
